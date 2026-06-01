@@ -1,0 +1,25 @@
+# 資料集
+*.tar.xz
+*.zip
+*.png
+*.jpg
+*.jpeg
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# 模型權重
+*.pt
+*.pth
+*.ckpt
+
+# Jupyter
+.ipynb_checkpoints/
+
+# 輸出結果
+runs/
+outputs/
+results/
