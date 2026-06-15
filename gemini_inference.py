@@ -112,15 +112,30 @@ _CATEGORY_RULES: dict[str, str] = {
     ),
 }
 
+# 自動生成問題清單的存放路徑
+_AUTO_QUESTIONS_DIR = Path.home() / "data/iad/code/results/auto_questions"
+
+
+def _load_auto_questions(category: str) -> list[str] | None:
+    """從 auto_questions/{category}.json 讀取問題清單，若不存在則回傳 None。"""
+    path = _AUTO_QUESTIONS_DIR / f"{category}.json"
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return data.get("questions")
+
+
 # 字型路徑（找不到時 fallback 到 Pillow 內建字型）
 _FONT_BOLD  = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 _FONT_LABEL_SIZE = 22    # 標籤文字大小（px）
 
 # API 呼叫失敗時的預設回傳值
 _FALLBACK: dict = {
-    "is_anomaly":   False,
-    "anomaly_type": "none",
-    "reason":       "parse_error",
+    "is_anomaly":       False,
+    "anomaly_type":     "none",
+    "logical_score":    10,
+    "structural_score": 10,
+    "reason":           "parse_error",
 }
 
 
@@ -188,9 +203,10 @@ def draw_detections(
 # 組成 Gemini Prompt
 # ---------------------------------------------------------------------------
 
-def _build_prompt(detections: list[dict], category: str) -> str:
+def _build_prompt(detections: list[dict], category: str, extra_context: str = "") -> str:
     """
     根據類別規格與偵測摘要，組成送給 Gemini 的完整 prompt。
+    extra_context 可注入額外資訊（如 PatchCore 偵測結果）。
     """
     rule = _CATEGORY_RULES.get(category, "請根據圖片判斷是否有工業瑕疵。")
 
@@ -205,6 +221,8 @@ def _build_prompt(detections: list[dict], category: str) -> str:
     else:
         det_summary = "YOLO 未偵測到任何異常框（模型信心不足或可能為正常品）。"
 
+    extra_block = f"\n【輔助偵測資訊】\n{extra_context}\n" if extra_context else ""
+
     return f"""你是一個工業產品視覺品管專家。
 
 【產品規格】
@@ -212,8 +230,7 @@ def _build_prompt(detections: list[dict], category: str) -> str:
 規格說明：{rule}
 
 【YOLO 偵測摘要】
-{det_summary}
-
+{det_summary}{extra_block}
 【【檢測任務】
 這是一張工業檢測圖片，產品類別是 {category}。
 圖中紅色框是 YOLO 偵測到的疑似結構異常區域（物理損傷、污染等）。
@@ -222,12 +239,129 @@ def _build_prompt(detections: list[dict], category: str) -> str:
 重要：若圖中有標注框，請優先以框住的區域作為判斷依據，仔細檢查框內的內容是否符合產品規格。
 不要忽略框的位置而只憑整體印象判斷。
 請根據圖片內容判斷：
-1. 這張圖片是否有異常？
-2. 如果有，主要是結構異常還是邏輯異常？
+1. 這張圖片是否有邏輯異常（數量/位置/顏色/比例錯誤）？給出 logical_score。
+2. 這張圖片是否有結構異常（物理損傷/污染/破損）？給出 structural_score。
 3. 具體的異常原因是什麼？
 
 只回傳 JSON，不要其他文字：
-{{"is_anomaly": true/false, "anomaly_type": "structural"/"logical"/"none", "reason": "..."}}"""
+{{"logical_score": 0-100, "structural_score": 0-100, "reason": "..."}}
+
+評分標準（0–100）：
+- 0–20：非常確定此類型正常
+- 21–40：大致正常，有些微疑慮
+- 41–60：不確定，可能有異常
+- 61–80：明確看到此類型異常
+- 81–100：非常確定有此類型異常且非常明顯"""
+
+
+def _build_prompt_patchcore(patchcore_text: str, category: str) -> str:
+    """
+    給 PatchCore+VLM pipeline 用的 prompt，
+    取代原本的 YOLO 偵測摘要，改用 PatchCore 的異常分數描述。
+    """
+    rule = _CATEGORY_RULES.get(category, "請根據圖片判斷是否有工業瑕疵。")
+
+    return f"""你是一個工業產品視覺品管專家。
+
+【產品規格】
+產品類別：{category}
+規格說明：{rule}
+
+【PatchCore 異常偵測結果】
+{patchcore_text}
+
+【檢測任務】
+這是一張工業檢測圖片，產品類別是 {category}。
+PatchCore 已標出圖片中異常分數較高的區域，請優先檢查這些高異常區域是否符合產品規格。
+若 PatchCore 顯示整體異常分數低（< 0.3），產品可能正常，但仍需確認規格。
+若 PatchCore 顯示整體異常分數高（>= 0.5），請仔細判斷是結構異常還是邏輯異常。
+不可忽略 PatchCore 標示的高異常區域。
+
+請根據圖片內容判斷：
+1. 這張圖片是否有邏輯異常（數量/位置/顏色/比例錯誤）？給出 logical_score。
+2. 這張圖片是否有結構異常（物理損傷/污染/破損）？給出 structural_score。
+3. 具體的異常原因是什麼？
+
+只回傳 JSON，不要其他文字：
+{{"logical_score": 0-100, "structural_score": 0-100, "reason": "..."}}
+
+評分標準（0–100）：
+- 0–20：非常確定此類型正常
+- 21–40：大致正常，有些微疑慮
+- 41–60：不確定，可能有異常
+- 61–80：明確看到此類型異常
+- 81–100：非常確定有此類型異常且非常明顯"""
+
+
+def _build_prompt_auto_questions(questions: list[str], category: str) -> str:
+    """
+    使用自動生成的問題清單建立 prompt，完全不依賴 _CATEGORY_RULES。
+    正常品所有問題應回答 Yes；任何一題 No 即判定為異常。
+    """
+    questions_text = "\n".join(questions)
+    return f"""你是一個工業產品視覺品管專家。
+
+【檢測任務】
+這是一張工業檢測圖片，產品類別是 {category}。
+請逐一回答以下問題（Yes/No），任何一題回答 No 即表示有異常。
+
+【檢測問題】
+{questions_text}
+
+評分說明：
+- 若某個問題回答 No，對應的異常分數應偏高（61–100）
+- 若所有問題皆為 Yes，logical_score 和 structural_score 都應偏低（0–30）
+- 根據 No 的問題判斷是邏輯異常（數量/位置/顏色）或結構異常（損壞/污染）
+
+只回傳 JSON，不要其他文字：
+{{"logical_score": 0-100, "structural_score": 0-100, "reason": "..."}}
+
+評分標準（0–100）：
+- 0–20：非常確定此類型正常
+- 21–40：大致正常，有些微疑慮
+- 41–60：不確定，可能有異常
+- 61–80：明確看到此類型異常
+- 81–100：非常確定有此類型異常且非常明顯"""
+
+
+def _build_prompt_patchcore_auto(
+    patchcore_text: str,
+    questions: list[str],
+    category: str,
+) -> str:
+    """
+    結合 PatchCore 偵測結果與自動生成問題清單的 prompt。
+    不依賴 _CATEGORY_RULES，用問題清單取代手寫規格。
+    """
+    questions_text = "\n".join(questions)
+    return f"""你是一個工業產品視覺品管專家。
+
+【PatchCore 異常偵測結果】
+{patchcore_text}
+
+【檢測任務】
+這是一張工業檢測圖片，產品類別是 {category}。
+請逐一回答以下問題（Yes/No），任何一題回答 No 即表示有異常。
+同時參考 PatchCore 分數：若整體異常分數 >= 0.5，請特別留意高異常區域的內容。
+
+【檢測問題】
+{questions_text}
+
+評分說明：
+- 若某個問題回答 No，對應的異常分數應偏高（61–100）
+- 若所有問題皆為 Yes，logical_score 和 structural_score 都應偏低（0–30）
+- 根據 No 的問題判斷是邏輯異常（數量/位置/顏色）或結構異常（損壞/污染）
+- 同時參考 PatchCore 分數：若整體異常分數 >= 0.5，請特別留意高異常區域的內容
+
+只回傳 JSON，不要其他文字：
+{{"logical_score": 0-100, "structural_score": 0-100, "reason": "..."}}
+
+評分標準（0–100）：
+- 0–20：非常確定此類型正常
+- 21–40：大致正常，有些微疑慮
+- 41–60：不確定，可能有異常
+- 61–80：明確看到此類型異常
+- 81–100：非常確定有此類型異常且非常明顯"""
 
 
 # ---------------------------------------------------------------------------
@@ -239,9 +373,12 @@ def _parse_response(text: str) -> dict:
     解析 Gemini 回傳的文字為結構化 dict。
 
     能處理以下格式：
-    - 純 JSON：{"is_anomaly": true, ...}
+    - 新版 JSON：{"logical_score": int, "structural_score": int, "reason": "..."}
+    - 舊版 JSON：{"is_anomaly": bool, "anomaly_type": str, "reason": "..."}
     - Markdown 包裝：```json\\n{...}\\n```
 
+    新版格式：從 logical_score / structural_score 推算 is_anomaly 和 anomaly_type。
+    舊版格式（缺少 score 欄位）：根據 is_anomaly / anomaly_type 推算分數。
     解析失敗時回傳 _FALLBACK。
     """
     # 去除 markdown code fence 標記
@@ -254,10 +391,40 @@ def _parse_response(text: str) -> dict:
 
     try:
         raw = json.loads(match.group())
+
+        logical_raw    = raw.get("logical_score")
+        structural_raw = raw.get("structural_score")
+
+        if logical_raw is not None and structural_raw is not None:
+            # 新版格式：從分數推算 is_anomaly / anomaly_type
+            logical_score    = int(max(0, min(100, logical_raw)))
+            structural_score = int(max(0, min(100, structural_raw)))
+            is_anomaly       = max(logical_score, structural_score) >= 50
+            if logical_score < 50 and structural_score < 50:
+                anomaly_type = "none"
+            elif logical_score >= structural_score:
+                anomaly_type = "logical"
+            else:
+                anomaly_type = "structural"
+        else:
+            # 舊版格式：從 is_anomaly / anomaly_type 推算分數
+            is_anomaly   = bool(raw.get("is_anomaly", False))
+            anomaly_type = str(raw.get("anomaly_type", "none"))
+            if not is_anomaly:
+                logical_score, structural_score = 10, 10
+            elif anomaly_type == "logical":
+                logical_score, structural_score = 80, 10
+            elif anomaly_type == "structural":
+                logical_score, structural_score = 10, 80
+            else:
+                logical_score, structural_score = 10, 10
+
         return {
-            "is_anomaly":   bool(raw.get("is_anomaly", False)),
-            "anomaly_type": str(raw.get("anomaly_type", "none")),
-            "reason":       str(raw.get("reason", "")),
+            "is_anomaly":       is_anomaly,
+            "anomaly_type":     anomaly_type,
+            "logical_score":    logical_score,
+            "structural_score": structural_score,
+            "reason":           str(raw.get("reason", "")),
         }
     except (json.JSONDecodeError, ValueError):
         return {**_FALLBACK}
@@ -274,6 +441,7 @@ def gemini_inference(
     client,
     max_retries: int = 4,
     retry_delay: float = 20.0,
+    extra_context: str = "",
 ) -> dict:
     """
     將標注後的圖片送給 Gemini 2.5 Flash 進行異常判斷。
@@ -308,7 +476,7 @@ def gemini_inference(
                 "reason":       f"YOLO 高置信度偵測到結構異常（conf={best_conf:.2f}），直接判定。",
             }
 
-    prompt = _build_prompt(detections, category)
+    prompt = _build_prompt(detections, category, extra_context=extra_context)
 
     fewshot_imgs = _load_fewshot_images(category)
     parts: list[_genai_types.Part] = []
@@ -332,6 +500,11 @@ def gemini_inference(
             response = client.models.generate_content(
                 model="gemma-4-31b-it",
                 contents=contents,
+                config=_genai_types.GenerateContentConfig(
+                    temperature=0.1,
+                    top_p=0.9,
+                    top_k=40,
+                ),
             )
             return _parse_response(response.text)
 
@@ -354,6 +527,241 @@ def gemini_inference(
                 time.sleep(retry_delay)
             else:
                 break   # 非可重試錯誤，或已達最大次數
+
+    print(f"  [錯誤] Gemini API 呼叫失敗（嘗試 {max_retries} 次）：{last_error}")
+    return {**_FALLBACK, "reason": f"api_error: {last_error}"}
+
+
+def gemini_inference_patchcore(
+    image: Image.Image,
+    patchcore_text: str,
+    category: str,
+    client,
+    max_retries: int = 4,
+    retry_delay: float = 20.0,
+) -> dict:
+    """
+    PatchCore+VLM pipeline 專用推論函式。
+
+    參數
+    ----
+    image          : 原始圖片（PIL.Image），不含 YOLO bbox
+    patchcore_text : anomaly_map_to_text() 產生的九宮格文字描述
+    category       : 產品類別字串，例如 'breakfast_box'
+    client         : genai.Client 實例
+    max_retries    : 最大重試次數（預設 4）
+    retry_delay    : 重試間隔秒數（預設 20）
+
+    回傳
+    ----
+    dict：{"is_anomaly": bool, "anomaly_type": str, "reason": str}
+    """
+    prompt = _build_prompt_patchcore(patchcore_text, category)
+
+    fewshot_imgs = _load_fewshot_images(category)
+    parts: list[_genai_types.Part] = []
+    for i, img in enumerate(fewshot_imgs):
+        parts.append(_pil_to_jpeg_part(img))
+        parts.append(_genai_types.Part.from_text(text=(
+            f"Reference image {i+1}: a normal (defect-free) product. "
+            "Use this to understand the overall appearance and layout. "
+            "Do NOT match pixel-level details; rely on the product spec rules below."
+        )))
+    parts.append(_pil_to_jpeg_part(image))
+    parts.append(_genai_types.Part.from_text(text=prompt))
+    contents = [_genai_types.Content(role="user", parts=parts)]
+
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_retries + 1):
+        time.sleep(5)
+        try:
+            response = client.models.generate_content(
+                model="gemma-4-31b-it",
+                contents=contents,
+                config=_genai_types.GenerateContentConfig(
+                    temperature=0.1,
+                    top_p=0.9,
+                    top_k=40,
+                ),
+            )
+            return _parse_response(response.text)
+
+        except Exception as exc:
+            last_error = exc
+            err_lower  = str(exc).lower()
+
+            is_retryable = any(kw in err_lower for kw in (
+                "429", "quota", "rate", "resource exhausted",
+                "503", "unavailable", "timeout", "deadline exceeded",
+                "500", "internal",
+            ))
+
+            if is_retryable and attempt < max_retries:
+                print(
+                    f"  [重試 {attempt}/{max_retries}] "
+                    f"API 暫時錯誤，{retry_delay:.0f} 秒後重試…  ({exc})"
+                )
+                time.sleep(retry_delay)
+            else:
+                break
+
+    print(f"  [錯誤] Gemini API 呼叫失敗（嘗試 {max_retries} 次）：{last_error}")
+    return {**_FALLBACK, "reason": f"api_error: {last_error}"}
+
+
+def gemini_inference_patchcore_auto(
+    image: Image.Image,
+    patchcore_text: str,
+    category: str,
+    client,
+    max_retries: int = 4,
+    retry_delay: float = 20.0,
+) -> dict:
+    """
+    PatchCore + 自動生成問題清單的推論函式。
+
+    結合 PatchCore anomaly_map 文字描述與 auto_questions 問題清單，
+    不使用 _CATEGORY_RULES 手寫規格，不包含 few-shot 正常圖片。
+    若問題清單不存在，fallback 到 _build_prompt_patchcore()。
+
+    參數
+    ----
+    image          : 原始圖片（PIL.Image），text mode 為原圖；heatmap mode 為原圖+熱力圖並排
+    patchcore_text : anomaly_map_to_text() 產生的九宮格文字描述
+    category       : 產品類別字串，例如 'breakfast_box'
+    client         : genai.Client 實例
+    max_retries    : 最大重試次數（預設 4）
+    retry_delay    : 重試間隔秒數（預設 20）
+
+    回傳
+    ----
+    dict：{"is_anomaly": bool, "anomaly_type": str, "reason": str}
+    """
+    questions = _load_auto_questions(category)
+    if questions:
+        prompt = _build_prompt_patchcore_auto(patchcore_text, questions, category)
+    else:
+        print(f"  [警告] {category} 無自動問題清單，fallback 到 PatchCore 預設 prompt")
+        prompt = _build_prompt_patchcore(patchcore_text, category)
+
+    parts: list[_genai_types.Part] = [
+        _pil_to_jpeg_part(image),
+        _genai_types.Part.from_text(text=prompt),
+    ]
+    contents = [_genai_types.Content(role="user", parts=parts)]
+
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_retries + 1):
+        time.sleep(5)
+        try:
+            response = client.models.generate_content(
+                model="gemma-4-31b-it",
+                contents=contents,
+                config=_genai_types.GenerateContentConfig(
+                    temperature=0.1,
+                    top_p=0.9,
+                    top_k=40,
+                ),
+            )
+            return _parse_response(response.text)
+
+        except Exception as exc:
+            last_error = exc
+            err_lower  = str(exc).lower()
+
+            is_retryable = any(kw in err_lower for kw in (
+                "429", "quota", "rate", "resource exhausted",
+                "503", "unavailable", "timeout", "deadline exceeded",
+                "500", "internal",
+            ))
+
+            if is_retryable and attempt < max_retries:
+                print(
+                    f"  [重試 {attempt}/{max_retries}] "
+                    f"API 暫時錯誤，{retry_delay:.0f} 秒後重試…  ({exc})"
+                )
+                time.sleep(retry_delay)
+            else:
+                break
+
+    print(f"  [錯誤] Gemini API 呼叫失敗（嘗試 {max_retries} 次）：{last_error}")
+    return {**_FALLBACK, "reason": f"api_error: {last_error}"}
+
+
+def gemini_inference_auto(
+    annotated_img: Image.Image,
+    category: str,
+    client,
+    max_retries: int = 3,
+    retry_delay: float = 20.0,
+) -> dict:
+    """
+    使用自動生成問題清單進行異常判斷。
+
+    不包含 few-shot 正常圖片，不包含高置信度 YOLO 早期返回。
+    若問題清單不存在，fallback 到原本的 _build_prompt()（空 detections）。
+
+    參數
+    ----
+    annotated_img : 已畫好 YOLO bbox 的 PIL.Image（或原圖）
+    category      : 產品類別字串，例如 'breakfast_box'
+    client        : genai.Client 實例
+    max_retries   : 最大重試次數（預設 3）
+    retry_delay   : 重試間隔秒數（預設 20）
+
+    回傳
+    ----
+    dict：{"is_anomaly": bool, "anomaly_type": str, "reason": str}
+    """
+    questions = _load_auto_questions(category)
+    if questions:
+        prompt = _build_prompt_auto_questions(questions, category)
+    else:
+        print(f"  [警告] {category} 無自動問題清單，fallback 到預設 prompt")
+        prompt = _build_prompt([], category)
+
+    parts: list[_genai_types.Part] = [
+        _pil_to_jpeg_part(annotated_img),
+        _genai_types.Part.from_text(text=prompt),
+    ]
+    contents = [_genai_types.Content(role="user", parts=parts)]
+
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_retries + 1):
+        time.sleep(5)
+        try:
+            response = client.models.generate_content(
+                model="gemma-4-31b-it",
+                contents=contents,
+                config=_genai_types.GenerateContentConfig(
+                    temperature=0.1,
+                    top_p=0.9,
+                    top_k=40,
+                ),
+            )
+            return _parse_response(response.text)
+
+        except Exception as exc:
+            last_error = exc
+            err_lower  = str(exc).lower()
+
+            is_retryable = any(kw in err_lower for kw in (
+                "429", "quota", "rate", "resource exhausted",
+                "503", "unavailable", "timeout", "deadline exceeded",
+                "500", "internal",
+            ))
+
+            if is_retryable and attempt < max_retries:
+                print(
+                    f"  [重試 {attempt}/{max_retries}] "
+                    f"API 暫時錯誤，{retry_delay:.0f} 秒後重試…  ({exc})"
+                )
+                time.sleep(retry_delay)
+            else:
+                break
 
     print(f"  [錯誤] Gemini API 呼叫失敗（嘗試 {max_retries} 次）：{last_error}")
     return {**_FALLBACK, "reason": f"api_error: {last_error}"}

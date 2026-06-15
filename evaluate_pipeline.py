@@ -261,6 +261,12 @@ def main() -> None:
         dest="anomaly_only",
         help="只跑異常圖片（149 張），跳過 good 圖片",
     )
+    parser.add_argument(
+        "--retry-errors",
+        action="store_true",
+        dest="retry_errors",
+        help="只重跑上次因 API 錯誤失敗的圖片（reason 含 api_error 或 parse_error）",
+    )
     args = parser.parse_args()
 
     api_key = os.environ.get("GEMINI_API_KEY", "")
@@ -300,6 +306,27 @@ def main() -> None:
     completed, all_records = load_completed_records(JSONL_PATH)
     if completed:
         print(f"已完成 {len(completed)} 張，跳過繼續…\n")
+
+    # ── retry-errors：只重跑錯誤記錄 ────────────────────────────────────────
+    if args.retry_errors:
+        error_stems = {
+            r["stem"] for r in all_records
+            if "api_error" in r.get("reason", "") or r.get("reason") == "parse_error"
+        }
+        if not error_stems:
+            print("JSONL 中沒有錯誤記錄，無需重跑。")
+            return
+        # 把錯誤記錄從 JSONL 移除，讓主迴圈重新寫入
+        clean_records = [r for r in all_records if r["stem"] not in error_stems]
+        JSONL_PATH.write_text(
+            "\n".join(json.dumps(r, ensure_ascii=False) for r in clean_records) + "\n",
+            encoding="utf-8",
+        )
+        all_records = clean_records
+        completed   = {r["stem"] for r in clean_records}
+        # 只保留 error stems 對應的圖片
+        all_items = [it for it in all_items if it["stem"] in error_stems]
+        print(f"找到 {len(error_stems)} 筆錯誤記錄，重跑這些圖片…\n")
 
     # ── 主迴圈 ──────────────────────────────────────────────────────────────
     errors          = 0
