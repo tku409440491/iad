@@ -58,9 +58,9 @@ _GRID_LABELS = [
 # PatchCore 載入
 # ---------------------------------------------------------------------------
 
-def load_patchcore(category: str):
+def load_patchcore(category: str, subdir: str = "Patchcore"):
     """載入指定類別最新的 PatchCore checkpoint，回傳 (model, ckpt_path)。"""
-    cat_dir = MODELS_DIR / category / "Patchcore" / category
+    cat_dir = MODELS_DIR / category / subdir / category
     if not cat_dir.exists():
         raise FileNotFoundError(f"找不到 {category} checkpoint 目錄：{cat_dir}")
 
@@ -255,14 +255,21 @@ def print_metrics(category: str, metrics: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def run_category(category: str, mode: str, client, jsonl_path: Path,
-                 test_only: bool = False, anomaly_only: bool = False) -> list[dict]:
+                 test_only: bool = False, anomaly_only: bool = False,
+                 few_shot: bool = False, backbone: str = "resnet",
+                 layers_str: str = "11") -> list[dict]:
     """對單一類別執行 PatchCore → VLM 管線。"""
     print(f"\n{'='*55}")
     print(f"PatchCore-VLM  [{mode}]  類別：{category}")
     print(f"{'='*55}")
 
-    # 載入 PatchCore
-    model, ckpt = load_patchcore(category)
+    # 根據 backbone、layers、few_shot 決定 checkpoint 子目錄
+    if backbone == "dinov2":
+        layer_tag = layers_str.replace(",", "_")
+        subdir = f"dinov2_{layer_tag}/Patchcore"
+    else:
+        subdir = "few5/Patchcore" if few_shot else "Patchcore"
+    model, ckpt = load_patchcore(category, subdir=subdir)
     img_min   = float(model.post_processor.image_min)
     img_max   = float(model.post_processor.image_max)
     pixel_min = float(model.post_processor.pixel_min)
@@ -401,6 +408,25 @@ def main() -> None:
         dest="retry_errors",
         help="只重跑上次因 API 錯誤失敗的圖片（reason 含 api_error 或 parse_error）",
     )
+    parser.add_argument(
+        "--few-shot",
+        action="store_true",
+        dest="few_shot",
+        help="使用 few-shot checkpoint（few5/ 子目錄），預設使用 full-shot",
+    )
+    parser.add_argument(
+        "--backbone",
+        type=str,
+        default="resnet",
+        choices=["resnet", "dinov2"],
+        help="使用哪個 backbone 的 checkpoint，預設 resnet",
+    )
+    parser.add_argument(
+        "--layers",
+        type=str,
+        default="11",
+        help="DINOv2 使用的 blocks，逗號分隔，例如 '11' 或 '3,9'，ResNet 時忽略",
+    )
     args = parser.parse_args()
 
     categories = args.category or CATEGORIES
@@ -416,7 +442,12 @@ def main() -> None:
     client = genai.Client(api_key=api_key)
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    jsonl_path = RESULTS_DIR / f"patchcore_vlm_{args.mode}_auto_results.jsonl"
+    if args.backbone == "dinov2":
+        layer_tag = args.layers.replace(",", "_")
+        suffix = f"_dinov2_{layer_tag}"
+    else:
+        suffix = "_few5" if args.few_shot else ""
+    jsonl_path = RESULTS_DIR / f"patchcore_vlm_{args.mode}_auto{suffix}_results.jsonl"
 
     # --reset：刪除既有結果從頭跑
     if args.reset and jsonl_path.exists():
@@ -442,8 +473,10 @@ def main() -> None:
 
     print(f"輸出檔案：{jsonl_path.name}")
     print(f"模式    ：{args.mode}")
+    layers_info = f"  layers={args.layers}" if args.backbone == "dinov2" else ""
+    print(f"Backbone ：{args.backbone}{layers_info}  {'few-shot (few5/)' if args.few_shot else 'full-shot'}")
     if args.anomaly_only:
-        print("模式    ：只跑異常圖片（跳過 good）")
+        print("篩選    ：只跑異常圖片（跳過 good）")
 
     all_records: list[dict] = []
     for cat in categories:
@@ -451,6 +484,9 @@ def main() -> None:
             cat, args.mode, client, jsonl_path,
             test_only=args.test_only,
             anomaly_only=args.anomaly_only,
+            few_shot=args.few_shot,
+            backbone=args.backbone,
+            layers_str=args.layers,
         )
         all_records.extend(records)
 

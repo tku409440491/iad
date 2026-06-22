@@ -62,7 +62,7 @@ INSPECT_DIR  = RESULTS_DIR / "inspect"
 
 YOLO_CONF = 0.10
 
-_GT_MAP = {"log": "logical", "str": "structural"}
+_GT_MAP = {"log": "logical", "str": "structural", "good": "good"}
 
 # anomaly_type CLI 輸入 → stem 用的短寫
 _ATYPE_NORM = {
@@ -143,7 +143,9 @@ def colorize_gt(
     img_id: str,
     orig: Image.Image,
 ) -> tuple[Image.Image, list[mpatches.Patch]]:
-    """GT mask 上色疊圖，回傳 (疊色圖, legend patches)。"""
+    """GT mask 上色疊圖，回傳 (疊色圖, legend patches)。good 圖片無 mask，直接回傳原圖。"""
+    if gt_class == "good":
+        return orig.copy(), []
     atype_folder = f"{gt_class}_anomalies"
     cfg_path     = DATASET_ROOT / category / "defects_config.json"
     mask_path    = DATASET_ROOT / category / "ground_truth" / atype_folder / img_id / "000.png"
@@ -201,7 +203,7 @@ def inspect_one(
     儲存路徑
     """
     category, gt_class, img_id = parse_stem(stem)
-    atype_folder = f"{gt_class}_anomalies"
+    atype_folder = "good" if gt_class == "good" else f"{gt_class}_anomalies"
     img_path     = DATASET_ROOT / category / "test" / atype_folder / f"{img_id}.png"
 
     if not img_path.exists():

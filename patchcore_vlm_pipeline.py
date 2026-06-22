@@ -57,9 +57,9 @@ _GRID_LABELS = [
 # PatchCore 載入
 # ---------------------------------------------------------------------------
 
-def load_patchcore(category: str):
+def load_patchcore(category: str, subdir: str = "Patchcore"):
     """載入指定類別最新的 PatchCore checkpoint，回傳 (model, ckpt_path)。"""
-    cat_dir = MODELS_DIR / category / "Patchcore" / category
+    cat_dir = MODELS_DIR / category / subdir / category
     if not cat_dir.exists():
         raise FileNotFoundError(f"找不到 {category} checkpoint 目錄：{cat_dir}")
 
