@@ -37,6 +37,11 @@ from google.genai import types as _genai_types
 # 常數設定
 # ---------------------------------------------------------------------------
 
+# 單次 API 請求逾時（毫秒）。google.genai 預設 timeout=None（無限等待），
+# 連線 stall 時 generate_content() 會永久阻塞且不拋例外，導致推論卡死。
+# 設定逾時後，stall 會轉為可重試的 timeout 例外。平均回應約 30 秒，給 120 秒上限。
+_API_TIMEOUT_MS = 120_000
+
 # 類別對應顏色（RGB）與名稱
 _CLASS_COLOR: dict[int, tuple[int, int, int]] = {
     0: (220, 50,  50),   # 結構異常（structural） → 紅色
@@ -123,6 +128,26 @@ def _load_auto_questions(category: str) -> list[str] | None:
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
     return data.get("questions")
+
+
+def _load_auto_questions_lq_sq(category: str) -> tuple[list[str], list[str]] | None:
+    """
+    分別從 {category}_logic.json 與 {category}_structural.json 讀取
+    邏輯性與結構性問題清單。
+
+    回傳 (logical_questions, structural_questions)；任一檔案不存在則回傳 None。
+    """
+    logic_path = _AUTO_QUESTIONS_DIR / f"{category}_logic.json"
+    struct_path = _AUTO_QUESTIONS_DIR / f"{category}_structural.json"
+    if not logic_path.exists() or not struct_path.exists():
+        return None
+    logic_data  = json.loads(logic_path.read_text(encoding="utf-8"))
+    struct_data = json.loads(struct_path.read_text(encoding="utf-8"))
+    logical_questions    = logic_data.get("logical_questions")
+    structural_questions = struct_data.get("structural_questions")
+    if logical_questions is None or structural_questions is None:
+        return None
+    return logical_questions, structural_questions
 
 
 # 字型路徑（找不到時 fallback 到 Pillow 內建字型）
@@ -364,6 +389,92 @@ def _build_prompt_patchcore_auto(
 - 81–100：非常確定有此類型異常且非常明顯"""
 
 
+def _build_prompt_patchcore_lq_sq(
+    patchcore_text: str,
+    logical_questions: list[str],
+    structural_questions: list[str],
+    category: str,
+) -> str:
+    """
+    結合偵測器異常報告與 LQ（邏輯）+ SQ（結構）兩組問題的 prompt。
+    logical_score 由 LQ 結果決定，structural_score 由 SQ 結果決定。
+    """
+    lq_text = "\n".join(logical_questions)
+    sq_text = "\n".join(structural_questions)
+    return f"""你是一個工業產品視覺品管專家。
+
+【產品類別】{category}
+
+【偵測器異常報告】
+{patchcore_text}
+
+【邏輯性檢測問題】
+請逐一回答以下問題（Yes/No），任何一題回答 No 即表示有邏輯異常：
+{lq_text}
+
+【結構性檢測問題】
+請逐一回答以下問題（Yes/No），任何一題回答 No 即表示有結構異常：
+{sq_text}
+
+評分標準（0–100）：
+- logical_score：根據邏輯性問題的回答結果評分
+  0–20：所有邏輯問題均為 Yes，非常確定邏輯正常
+  21–40：大致正常，有些微疑慮
+  41–60：不確定，可能有邏輯異常
+  61–80：明確發現邏輯異常
+  81–100：非常確定有嚴重邏輯異常
+
+- structural_score：根據結構性問題的回答結果評分
+  0–20：所有結構問題均為 Yes，非常確定結構正常
+  21–40：大致正常，有些微疑慮
+  41–60：不確定，可能有結構異常
+  61–80：明確發現結構異常
+  81–100：非常確定有嚴重結構異常
+
+只回傳 JSON，不要其他文字：
+{{"logical_score": 0-100, "structural_score": 0-100, "reason": "..."}}"""
+
+
+def _build_prompt_efficientad_auto(
+    efficientad_text: str,
+    questions: list[str],
+    category: str,
+) -> str:
+    """
+    結合 EfficientAD 偵測結果與自動生成問題清單的 prompt。
+    不依賴 _CATEGORY_RULES，用問題清單取代手寫規格。
+    """
+    questions_text = "\n".join(questions)
+    return f"""你是一個工業產品視覺品管專家。
+
+【EfficientAD 異常偵測結果】
+{efficientad_text}
+
+【檢測任務】
+這是一張工業檢測圖片，產品類別是 {category}。
+請逐一回答以下問題（Yes/No），任何一題回答 No 即表示有異常。
+同時參考 EfficientAD 分數：若整體異常分數 >= 0.5，請特別留意高異常區域的內容。
+
+【檢測問題】
+{questions_text}
+
+評分說明：
+- 若某個問題回答 No，對應的異常分數應偏高（61–100）
+- 若所有問題皆為 Yes，logical_score 和 structural_score 都應偏低（0–30）
+- 根據 No 的問題判斷是邏輯異常（數量/位置/顏色）或結構異常（損壞/污染）
+- 同時參考 EfficientAD 分數：若整體異常分數 >= 0.5，請特別留意高異常區域的內容
+
+只回傳 JSON，不要其他文字：
+{{"logical_score": 0-100, "structural_score": 0-100, "reason": "..."}}
+
+評分標準（0–100）：
+- 0–20：非常確定此類型正常
+- 21–40：大致正常，有些微疑慮
+- 41–60：不確定，可能有異常
+- 61–80：明確看到此類型異常
+- 81–100：非常確定有此類型異常且非常明顯"""
+
+
 # ---------------------------------------------------------------------------
 # 解析 Gemini 回應
 # ---------------------------------------------------------------------------
@@ -504,13 +615,16 @@ def gemini_inference(
                     temperature=0.1,
                     top_p=0.9,
                     top_k=40,
+                    http_options=_genai_types.HttpOptions(timeout=_API_TIMEOUT_MS),
                 ),
             )
             return _parse_response(response.text)
 
         except Exception as exc:
             last_error = exc
-            err_lower  = str(exc).lower()
+            # 併入例外類別名稱：httpx 逾時例外的 str() 常為空字串，
+            # 需靠類別名（如 ReadTimeout/ConnectTimeout）才能判定為可重試
+            err_lower  = f"{type(exc).__name__} {exc}".lower()
 
             # 判斷是否為可重試的暫時性錯誤
             is_retryable = any(kw in err_lower for kw in (
@@ -583,13 +697,16 @@ def gemini_inference_patchcore(
                     temperature=0.1,
                     top_p=0.9,
                     top_k=40,
+                    http_options=_genai_types.HttpOptions(timeout=_API_TIMEOUT_MS),
                 ),
             )
             return _parse_response(response.text)
 
         except Exception as exc:
             last_error = exc
-            err_lower  = str(exc).lower()
+            # 併入例外類別名稱：httpx 逾時例外的 str() 常為空字串，
+            # 需靠類別名（如 ReadTimeout/ConnectTimeout）才能判定為可重試
+            err_lower  = f"{type(exc).__name__} {exc}".lower()
 
             is_retryable = any(kw in err_lower for kw in (
                 "429", "quota", "rate", "resource exhausted",
@@ -663,13 +780,181 @@ def gemini_inference_patchcore_auto(
                     temperature=0.1,
                     top_p=0.9,
                     top_k=40,
+                    http_options=_genai_types.HttpOptions(timeout=_API_TIMEOUT_MS),
                 ),
             )
             return _parse_response(response.text)
 
         except Exception as exc:
             last_error = exc
-            err_lower  = str(exc).lower()
+            # 併入例外類別名稱：httpx 逾時例外的 str() 常為空字串，
+            # 需靠類別名（如 ReadTimeout/ConnectTimeout）才能判定為可重試
+            err_lower  = f"{type(exc).__name__} {exc}".lower()
+
+            is_retryable = any(kw in err_lower for kw in (
+                "429", "quota", "rate", "resource exhausted",
+                "503", "unavailable", "timeout", "deadline exceeded",
+                "500", "internal",
+            ))
+
+            if is_retryable and attempt < max_retries:
+                print(
+                    f"  [重試 {attempt}/{max_retries}] "
+                    f"API 暫時錯誤，{retry_delay:.0f} 秒後重試…  ({exc})"
+                )
+                time.sleep(retry_delay)
+            else:
+                break
+
+    print(f"  [錯誤] Gemini API 呼叫失敗（嘗試 {max_retries} 次）：{last_error}")
+    return {**_FALLBACK, "reason": f"api_error: {last_error}"}
+
+
+def gemini_inference_patchcore_lq_sq(
+    image: Image.Image,
+    patchcore_text: str,
+    category: str,
+    client,
+    max_retries: int = 4,
+    retry_delay: float = 20.0,
+) -> dict:
+    """
+    PatchCore + LQ/SQ 雙組問題清單的推論函式。
+
+    從 {category}_logic.json 與 {category}_structural.json 讀取兩組問題，
+    logical_score 由邏輯問題決定、structural_score 由結構問題決定。
+
+    參數與 gemini_inference_patchcore_auto() 相同。
+    若任一問題檔不存在，fallback 到 _build_prompt_patchcore_auto()（單組問題）。
+
+    回傳
+    ----
+    dict：{"is_anomaly": bool, "anomaly_type": str, "reason": str,
+           "logical_score": int, "structural_score": int}
+    """
+    lq_sq = _load_auto_questions_lq_sq(category)
+    if lq_sq is not None:
+        logical_questions, structural_questions = lq_sq
+        prompt = _build_prompt_patchcore_lq_sq(
+            patchcore_text, logical_questions, structural_questions, category
+        )
+    else:
+        questions = _load_auto_questions(category)
+        if questions:
+            print(f"  [警告] {category} 缺 LQ/SQ 問題檔，fallback 到單組 auto 問題")
+            prompt = _build_prompt_patchcore_auto(patchcore_text, questions, category)
+        else:
+            print(f"  [警告] {category} 無任何問題清單，fallback 到 PatchCore 預設 prompt")
+            prompt = _build_prompt_patchcore(patchcore_text, category)
+
+    parts: list[_genai_types.Part] = [
+        _pil_to_jpeg_part(image),
+        _genai_types.Part.from_text(text=prompt),
+    ]
+    contents = [_genai_types.Content(role="user", parts=parts)]
+
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_retries + 1):
+        time.sleep(5)
+        try:
+            response = client.models.generate_content(
+                model="gemma-4-31b-it",
+                contents=contents,
+                config=_genai_types.GenerateContentConfig(
+                    temperature=0.1,
+                    top_p=0.9,
+                    top_k=40,
+                    http_options=_genai_types.HttpOptions(timeout=_API_TIMEOUT_MS),
+                ),
+            )
+            return _parse_response(response.text)
+
+        except Exception as exc:
+            last_error = exc
+            # 併入例外類別名稱：httpx 逾時例外的 str() 常為空字串，
+            # 需靠類別名（如 ReadTimeout/ConnectTimeout）才能判定為可重試
+            err_lower  = f"{type(exc).__name__} {exc}".lower()
+
+            is_retryable = any(kw in err_lower for kw in (
+                "429", "quota", "rate", "resource exhausted",
+                "503", "unavailable", "timeout", "deadline exceeded",
+                "500", "internal",
+            ))
+
+            if is_retryable and attempt < max_retries:
+                print(
+                    f"  [重試 {attempt}/{max_retries}] "
+                    f"API 暫時錯誤，{retry_delay:.0f} 秒後重試…  ({exc})"
+                )
+                time.sleep(retry_delay)
+            else:
+                break
+
+    print(f"  [錯誤] Gemini API 呼叫失敗（嘗試 {max_retries} 次）：{last_error}")
+    return {**_FALLBACK, "reason": f"api_error: {last_error}"}
+
+
+def gemini_inference_efficientad_auto(
+    image: Image.Image,
+    anomaly_text: str,
+    category: str,
+    client,
+    max_retries: int = 4,
+    retry_delay: float = 20.0,
+) -> dict:
+    """
+    EfficientAD + 自動生成問題清單的推論函式。
+
+    結合 EfficientAD anomaly_map 文字描述與 auto_questions 問題清單，
+    不使用 _CATEGORY_RULES 手寫規格，不包含 few-shot 正常圖片。
+
+    參數
+    ----
+    image        : 原始圖片（PIL.Image），text mode 為原圖；heatmap mode 為原圖+熱力圖並排
+    anomaly_text : anomaly_map_to_text() 產生的九宮格文字描述
+    category     : 產品類別字串，例如 'breakfast_box'
+    client       : genai.Client 實例
+    max_retries  : 最大重試次數（預設 4）
+    retry_delay  : 重試間隔秒數（預設 20）
+
+    回傳
+    ----
+    dict：{"is_anomaly": bool, "anomaly_type": str, "reason": str}
+    """
+    questions = _load_auto_questions(category)
+    if not questions:
+        print(f"  [警告] {category} 無自動問題清單，EfficientAD prompt 將不含檢測問題")
+    prompt = _build_prompt_efficientad_auto(anomaly_text, questions, category)
+
+    parts: list[_genai_types.Part] = [
+        _pil_to_jpeg_part(image),
+        _genai_types.Part.from_text(text=prompt),
+    ]
+    contents = [_genai_types.Content(role="user", parts=parts)]
+
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_retries + 1):
+        time.sleep(5)
+        try:
+            response = client.models.generate_content(
+                model="gemma-4-31b-it",
+                contents=contents,
+                config=_genai_types.GenerateContentConfig(
+                    temperature=0.1,
+                    top_p=0.9,
+                    top_k=40,
+                    http_options=_genai_types.HttpOptions(timeout=_API_TIMEOUT_MS),
+                ),
+            )
+            return _parse_response(response.text)
+
+        except Exception as exc:
+            last_error = exc
+            # 併入例外類別名稱：httpx 逾時例外的 str() 常為空字串，
+            # 需靠類別名（如 ReadTimeout/ConnectTimeout）才能判定為可重試
+            err_lower  = f"{type(exc).__name__} {exc}".lower()
 
             is_retryable = any(kw in err_lower for kw in (
                 "429", "quota", "rate", "resource exhausted",
@@ -740,13 +1025,16 @@ def gemini_inference_auto(
                     temperature=0.1,
                     top_p=0.9,
                     top_k=40,
+                    http_options=_genai_types.HttpOptions(timeout=_API_TIMEOUT_MS),
                 ),
             )
             return _parse_response(response.text)
 
         except Exception as exc:
             last_error = exc
-            err_lower  = str(exc).lower()
+            # 併入例外類別名稱：httpx 逾時例外的 str() 常為空字串，
+            # 需靠類別名（如 ReadTimeout/ConnectTimeout）才能判定為可重試
+            err_lower  = f"{type(exc).__name__} {exc}".lower()
 
             is_retryable = any(kw in err_lower for kw in (
                 "429", "quota", "rate", "resource exhausted",
