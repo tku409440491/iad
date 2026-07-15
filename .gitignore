@@ -28,3 +28,6 @@ results/
 
 # 執行記錄
 *.log
+
+# 第三方 clone（liutongkun/ComAD，有自己的 .git，不納入本 repo）
+comad_repo/
