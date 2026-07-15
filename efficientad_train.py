@@ -27,7 +27,7 @@ from anomalib.models import EfficientAd
 
 LOCO_ROOT    = Path.home() / "data/iad/mvtec_loco"
 MODELS_DIR   = Path.home() / "data/iad/code/results/efficientad_models"
-IMAGENET_DIR = Path.home() / "data/iad/code/datasets/imagenette"
+IMAGENET_DIR = Path.home() / "data/iad/code/datasets/imagenet/val"
 
 CATEGORIES = [
     "breakfast_box", "juice_bottle", "pushpins",
@@ -133,7 +133,7 @@ def main() -> None:
     size_label = "S" if args.model_size == "s" else "M"
     print(f"準備訓練 {len(categories)} 個類別：{categories}")
     print(f"模型大小：EfficientAD-{size_label}")
-    print(f"ImageNette 路徑：{IMAGENET_DIR}")
+    print(f"ImageNet 路徑：{IMAGENET_DIR}")
 
     for cat in categories:
         train_category(cat, model_size=args.model_size, max_steps=args.max_steps)
