@@ -448,6 +448,48 @@ def _build_prompt_patchcore_lq_sq(
 {{"logical_score": 0-100, "structural_score": 0-100, "reason": "..."}}"""
 
 
+def _build_prompt_patchcore_lqsq_counting(
+    patchcore_text: str,
+    counting_text: str,
+    logical_questions: list[str],
+    structural_questions: list[str],
+    category: str,
+) -> str:
+    """
+    結合計數分析 + 偵測器報告 + LQ（邏輯）/ SQ（結構）兩組問題的 prompt。
+    計數不符時 logical_score 應偏高（>= 60）。
+    """
+    lq_text = "\n".join(logical_questions)
+    sq_text = "\n".join(structural_questions)
+    return f"""你是一個工業產品視覺品管專家。
+
+【產品類別】{category}
+
+【計數分析】
+{counting_text}
+
+【偵測器異常報告】
+{patchcore_text}
+
+【邏輯性檢測問題】
+請逐一回答以下問題（Yes/No），任何一題回答 No 即表示有邏輯異常：
+{lq_text}
+
+【結構性檢測問題】
+請逐一回答以下問題（Yes/No），任何一題回答 No 即表示有結構異常：
+{sq_text}
+
+評分標準（0–100）：
+- logical_score：根據計數分析和邏輯性問題的回答結果評分
+  如果計數分析顯示數量不符，logical_score 應 ≥ 60
+  0–20：計數正確且所有邏輯問題均為 Yes；81–100：計數嚴重不符或明確發現邏輯異常
+- structural_score：根據結構性問題的回答結果評分
+  0–20：所有結構問題均為 Yes；81–100：明確發現嚴重結構異常
+
+只回傳 JSON，不要其他文字：
+{{"logical_score": 0-100, "structural_score": 0-100, "reason": "..."}}"""
+
+
 def _format_comad_spec(component_spec: list[dict]) -> str:
     """把 component_spec 清單格式化成規格書條列文字。"""
     lines = []
@@ -912,6 +954,108 @@ def gemini_inference_patchcore_lq_sq(
         prompt = _build_prompt_patchcore_lq_sq(
             patchcore_text, logical_questions, structural_questions, category
         )
+    else:
+        questions = _load_auto_questions(category)
+        if questions:
+            print(f"  [警告] {category} 缺 LQ/SQ 問題檔，fallback 到單組 auto 問題")
+            prompt = _build_prompt_patchcore_auto(patchcore_text, questions, category)
+        else:
+            print(f"  [警告] {category} 無任何問題清單，fallback 到 PatchCore 預設 prompt")
+            prompt = _build_prompt_patchcore(patchcore_text, category)
+
+    parts: list[_genai_types.Part] = [
+        _pil_to_jpeg_part(image),
+        _genai_types.Part.from_text(text=prompt),
+    ]
+    contents = [_genai_types.Content(role="user", parts=parts)]
+
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_retries + 1):
+        time.sleep(5)
+        try:
+            response = client.models.generate_content(
+                model="gemma-4-31b-it",
+                contents=contents,
+                config=_genai_types.GenerateContentConfig(
+                    temperature=0.1,
+                    top_p=0.9,
+                    top_k=40,
+                    http_options=_genai_types.HttpOptions(timeout=_API_TIMEOUT_MS),
+                ),
+            )
+            return _parse_response(response.text)
+
+        except Exception as exc:
+            last_error = exc
+            # 併入例外類別名稱：httpx 逾時例外的 str() 常為空字串，
+            # 需靠類別名（如 ReadTimeout/ConnectTimeout）才能判定為可重試
+            err_lower  = f"{type(exc).__name__} {exc}".lower()
+
+            is_retryable = any(kw in err_lower for kw in (
+                "429", "quota", "rate", "resource exhausted",
+                "503", "unavailable", "timeout", "deadline exceeded",
+                "500", "internal",
+            ))
+
+            if is_retryable and attempt < max_retries:
+                print(
+                    f"  [重試 {attempt}/{max_retries}] "
+                    f"API 暫時錯誤，{retry_delay:.0f} 秒後重試…  ({exc})"
+                )
+                time.sleep(retry_delay)
+            else:
+                break
+
+    print(f"  [錯誤] Gemini API 呼叫失敗（嘗試 {max_retries} 次）：{last_error}")
+    return {**_FALLBACK, "reason": f"api_error: {last_error}"}
+
+
+def gemini_inference_patchcore_lqsq_counting(
+    image: Image.Image,
+    patchcore_text: str,
+    counting_text: str | None,
+    category: str,
+    client,
+    max_retries: int = 4,
+    retry_delay: float = 20.0,
+) -> dict:
+    """
+    PatchCore + 計數分析 + LQ/SQ 雙組問題的推論函式。
+
+    載入 {category}_logic/structural.json；若 counting_text 非 None，
+    prompt 額外加入【計數分析】區塊（計數不符時引導 logical_score >= 60）。
+    若 counting_text 為 None（該類別無可數物件），退回與
+    gemini_inference_patchcore_lq_sq() 相同的 prompt。
+
+    參數
+    ----
+    image          : 原始圖片（PIL.Image）
+    patchcore_text : anomaly_map_to_text() 產生的九宮格文字描述
+    counting_text  : vlm_count() 產生的計數分析文字，或 None（不計數）
+    category       : 產品類別字串
+    client         : genai.Client 實例
+    max_retries    : 最大重試次數（預設 4）
+    retry_delay    : 重試間隔秒數（預設 20）
+
+    回傳
+    ----
+    dict：{"is_anomaly": bool, "anomaly_type": str, "reason": str,
+           "logical_score": int, "structural_score": int}
+    """
+    lq_sq = _load_auto_questions_lq_sq(category)
+    if lq_sq is not None:
+        logical_questions, structural_questions = lq_sq
+        if counting_text is not None:
+            prompt = _build_prompt_patchcore_lqsq_counting(
+                patchcore_text, counting_text,
+                logical_questions, structural_questions, category
+            )
+        else:
+            # 無計數資訊 → 退回一般 LQ/SQ prompt
+            prompt = _build_prompt_patchcore_lq_sq(
+                patchcore_text, logical_questions, structural_questions, category
+            )
     else:
         questions = _load_auto_questions(category)
         if questions:

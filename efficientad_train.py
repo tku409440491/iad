@@ -27,7 +27,7 @@ from anomalib.models import EfficientAd
 
 LOCO_ROOT    = Path.home() / "data/iad/mvtec_loco"
 MODELS_DIR   = Path.home() / "data/iad/code/results/efficientad_models"
-IMAGENET_DIR = Path.home() / "data/iad/code/datasets/imagenet/val"
+IMAGENET_DIR = Path.home() / "data/iad/code/datasets/imagenet/train"
 
 CATEGORIES = [
     "breakfast_box", "juice_bottle", "pushpins",
