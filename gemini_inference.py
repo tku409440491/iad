@@ -490,6 +490,55 @@ def _build_prompt_patchcore_lqsq_counting(
 {{"logical_score": 0-100, "structural_score": 0-100, "reason": "..."}}"""
 
 
+def _build_prompt_patchcore_lqsq_counting_maxpixel(
+    patchcore_text: str,
+    counting_text: str | None,
+    logical_questions: list[str],
+    structural_questions: list[str],
+    category: str,
+) -> str:
+    """
+    與 _build_prompt_patchcore_lqsq_counting() 相同，但偵測器異常報告採用「方案 A」
+    最大值位置格式（patchcore_text 由 pipeline 以 anomaly_map_to_max_location 產生），
+    並加入 VLM 報告一致性引導。counting_text 為 None 時省略【計數分析】區塊。
+    """
+    lq_text = "\n".join(logical_questions)
+    sq_text = "\n".join(structural_questions)
+    counting_block = f"""【計數分析】
+{counting_text}
+
+""" if counting_text is not None else ""
+    return f"""你是一個工業產品視覺品管專家。
+
+【產品類別】{category}
+
+{counting_block}【偵測器異常報告】
+{patchcore_text}
+
+【重要提示】
+你的推理報告（reason）應與偵測器分數一致：
+- 如果偵測器整體異常分數 ≥ 0.9，你的報告應說明在異常最高點區域觀察到什麼可能的問題
+- 如果你判斷為正常，但偵測器分數很高，請在報告中說明為何你認為偵測器的高分是誤報（例如：自然紋理變異、光線影響等）
+
+【邏輯性檢測問題】
+請逐一回答以下問題（Yes/No），任何一題回答 No 即表示有邏輯異常：
+{lq_text}
+
+【結構性檢測問題】
+請逐一回答以下問題（Yes/No），任何一題回答 No 即表示有結構異常：
+{sq_text}
+
+評分標準（0–100）：
+- logical_score：根據計數分析和邏輯性問題的回答結果評分
+  如果計數分析顯示數量不符，logical_score 應 ≥ 60
+  0–20：計數正確且所有邏輯問題均為 Yes；81–100：計數嚴重不符或明確發現邏輯異常
+- structural_score：根據結構性問題的回答結果評分
+  0–20：所有結構問題均為 Yes；81–100：明確發現嚴重結構異常
+
+只回傳 JSON，不要其他文字：
+{{"logical_score": 0-100, "structural_score": 0-100, "reason": "..."}}"""
+
+
 def _format_comad_spec(component_spec: list[dict]) -> str:
     """把 component_spec 清單格式化成規格書條列文字。"""
     lines = []
@@ -1056,6 +1105,89 @@ def gemini_inference_patchcore_lqsq_counting(
             prompt = _build_prompt_patchcore_lq_sq(
                 patchcore_text, logical_questions, structural_questions, category
             )
+    else:
+        questions = _load_auto_questions(category)
+        if questions:
+            print(f"  [警告] {category} 缺 LQ/SQ 問題檔，fallback 到單組 auto 問題")
+            prompt = _build_prompt_patchcore_auto(patchcore_text, questions, category)
+        else:
+            print(f"  [警告] {category} 無任何問題清單，fallback 到 PatchCore 預設 prompt")
+            prompt = _build_prompt_patchcore(patchcore_text, category)
+
+    parts: list[_genai_types.Part] = [
+        _pil_to_jpeg_part(image),
+        _genai_types.Part.from_text(text=prompt),
+    ]
+    contents = [_genai_types.Content(role="user", parts=parts)]
+
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_retries + 1):
+        time.sleep(5)
+        try:
+            response = client.models.generate_content(
+                model="gemma-4-31b-it",
+                contents=contents,
+                config=_genai_types.GenerateContentConfig(
+                    temperature=0.1,
+                    top_p=0.9,
+                    top_k=40,
+                    http_options=_genai_types.HttpOptions(timeout=_API_TIMEOUT_MS),
+                ),
+            )
+            return _parse_response(response.text)
+
+        except Exception as exc:
+            last_error = exc
+            # 併入例外類別名稱：httpx 逾時例外的 str() 常為空字串，
+            # 需靠類別名（如 ReadTimeout/ConnectTimeout）才能判定為可重試
+            err_lower  = f"{type(exc).__name__} {exc}".lower()
+
+            is_retryable = any(kw in err_lower for kw in (
+                "429", "quota", "rate", "resource exhausted",
+                "503", "unavailable", "timeout", "deadline exceeded",
+                "500", "internal",
+            ))
+
+            if is_retryable and attempt < max_retries:
+                print(
+                    f"  [重試 {attempt}/{max_retries}] "
+                    f"API 暫時錯誤，{retry_delay:.0f} 秒後重試…  ({exc})"
+                )
+                time.sleep(retry_delay)
+            else:
+                break
+
+    print(f"  [錯誤] Gemini API 呼叫失敗（嘗試 {max_retries} 次）：{last_error}")
+    return {**_FALLBACK, "reason": f"api_error: {last_error}"}
+
+
+def gemini_inference_patchcore_lqsq_counting_maxpixel(
+    image: Image.Image,
+    patchcore_text: str,
+    counting_text: str | None,
+    category: str,
+    client,
+    max_retries: int = 4,
+    retry_delay: float = 20.0,
+) -> dict:
+    """
+    與 gemini_inference_patchcore_lqsq_counting() 相同，但使用「方案 A」最大值位置
+    偵測器報告格式（patchcore_text 由 pipeline 以 anomaly_map_to_max_location 產生），
+    並在 prompt 加入 VLM 報告一致性引導。
+
+    有 LQ/SQ 問題時一律使用 maxpixel prompt（counting_text 為 None 時省略計數區塊，
+    仍保留方案 A 格式與一致性引導）；無 LQ/SQ 時 fallback 到單組 auto / 預設。
+
+    參數與 gemini_inference_patchcore_lqsq_counting() 相同。
+    """
+    lq_sq = _load_auto_questions_lq_sq(category)
+    if lq_sq is not None:
+        logical_questions, structural_questions = lq_sq
+        prompt = _build_prompt_patchcore_lqsq_counting_maxpixel(
+            patchcore_text, counting_text,
+            logical_questions, structural_questions, category
+        )
     else:
         questions = _load_auto_questions(category)
         if questions:
