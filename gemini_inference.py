@@ -42,6 +42,15 @@ from google.genai import types as _genai_types
 # 設定逾時後，stall 會轉為可重試的 timeout 例外。平均回應約 30 秒，給 120 秒上限。
 _API_TIMEOUT_MS = 120_000
 
+# VLM 模型名稱（可用 set_vlm_model() 於執行時切換）
+VLM_MODEL = "gemma-4-31b-it"
+
+
+def set_vlm_model(model_name: str):
+    """切換全域 VLM 模型名稱，供各推論函式使用。"""
+    global VLM_MODEL
+    VLM_MODEL = model_name
+
 # 類別對應顏色（RGB）與名稱
 _CLASS_COLOR: dict[int, tuple[int, int, int]] = {
     0: (220, 50,  50),   # 結構異常（structural） → 紅色
@@ -774,7 +783,7 @@ def gemini_inference(
         time.sleep(5)
         try:
             response = client.models.generate_content(
-                model="gemma-4-31b-it",
+                model=VLM_MODEL,
                 contents=contents,
                 config=_genai_types.GenerateContentConfig(
                     temperature=0.1,
@@ -856,7 +865,7 @@ def gemini_inference_patchcore(
         time.sleep(5)
         try:
             response = client.models.generate_content(
-                model="gemma-4-31b-it",
+                model=VLM_MODEL,
                 contents=contents,
                 config=_genai_types.GenerateContentConfig(
                     temperature=0.1,
@@ -939,7 +948,7 @@ def gemini_inference_patchcore_auto(
         time.sleep(5)
         try:
             response = client.models.generate_content(
-                model="gemma-4-31b-it",
+                model=VLM_MODEL,
                 contents=contents,
                 config=_genai_types.GenerateContentConfig(
                     temperature=0.1,
@@ -1024,7 +1033,7 @@ def gemini_inference_patchcore_lq_sq(
         time.sleep(5)
         try:
             response = client.models.generate_content(
-                model="gemma-4-31b-it",
+                model=VLM_MODEL,
                 contents=contents,
                 config=_genai_types.GenerateContentConfig(
                     temperature=0.1,
@@ -1126,7 +1135,7 @@ def gemini_inference_patchcore_lqsq_counting(
         time.sleep(5)
         try:
             response = client.models.generate_content(
-                model="gemma-4-31b-it",
+                model=VLM_MODEL,
                 contents=contents,
                 config=_genai_types.GenerateContentConfig(
                     temperature=0.1,
@@ -1209,7 +1218,7 @@ def gemini_inference_patchcore_lqsq_counting_maxpixel(
         time.sleep(5)
         try:
             response = client.models.generate_content(
-                model="gemma-4-31b-it",
+                model=VLM_MODEL,
                 contents=contents,
                 config=_genai_types.GenerateContentConfig(
                     temperature=0.1,
@@ -1314,7 +1323,7 @@ def gemini_inference_patchcore_comad_lqsq(
         time.sleep(5)
         try:
             response = client.models.generate_content(
-                model="gemma-4-31b-it",
+                model=VLM_MODEL,
                 contents=contents,
                 config=_genai_types.GenerateContentConfig(
                     temperature=0.1,
@@ -1394,7 +1403,7 @@ def gemini_inference_efficientad_auto(
         time.sleep(5)
         try:
             response = client.models.generate_content(
-                model="gemma-4-31b-it",
+                model=VLM_MODEL,
                 contents=contents,
                 config=_genai_types.GenerateContentConfig(
                     temperature=0.1,
@@ -1474,7 +1483,7 @@ def gemini_inference_auto(
         time.sleep(5)
         try:
             response = client.models.generate_content(
-                model="gemma-4-31b-it",
+                model=VLM_MODEL,
                 contents=contents,
                 config=_genai_types.GenerateContentConfig(
                     temperature=0.1,

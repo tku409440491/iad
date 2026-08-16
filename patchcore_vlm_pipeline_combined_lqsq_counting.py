@@ -416,7 +416,13 @@ def main() -> None:
                         help="使用哪個 backbone 的 checkpoint，預設 resnet")
     parser.add_argument("--layers", type=str, default="11",
                         help="DINOv2 使用的 blocks，逗號分隔，例如 '11' 或 '3,9'，ResNet 時忽略")
+    parser.add_argument("--vlm-model", type=str, default="gemma-4-31b-it", dest="vlm_model",
+                        help="VLM 模型名稱")
     args = parser.parse_args()
+
+    from gemini_inference import set_vlm_model
+    set_vlm_model(args.vlm_model)
+    print(f"VLM 模型：{args.vlm_model}")
 
     categories = args.category or CATEGORIES
     unknown = [c for c in categories if c not in CATEGORIES]

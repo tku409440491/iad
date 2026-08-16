@@ -113,6 +113,44 @@ def calibrate_with_validation(model, category, save_dir, engine=None, ckpt_path=
     return calibration
 
 
+def calibrate_with_images(model, image_paths, save_dir, engine=None, ckpt_path=None) -> dict:
+    """
+    用指定圖片清單校準 threshold、min、max（few-shot full 模式：用建庫的同一批圖）。
+    邏輯同 calibrate_with_validation，但圖片來源改為傳入的 image_paths，
+    校準結果存成 calibration_fewshot.json。
+    """
+    model.eval()  # 剛訓練完仍在 train 模式，需切 eval 才能取得 pred_score
+
+    scores = [predict_one_image(model, p) for p in image_paths]
+
+    img_min   = min(scores)
+    img_max   = max(scores)
+    threshold = max(scores)
+
+    with torch.no_grad():
+        model.post_processor.image_min.copy_(torch.tensor(float(img_min)))
+        model.post_processor.image_max.copy_(torch.tensor(float(img_max)))
+        model.post_processor._image_threshold.copy_(torch.tensor(float(threshold)))
+
+    calibration = {
+        "img_min":    float(img_min),
+        "img_max":    float(img_max),
+        "threshold":  float(threshold),
+        "n_images":   len(scores),
+    }
+    cal_path = save_dir / "calibration_fewshot.json"
+    with cal_path.open("w", encoding="utf-8") as f:
+        json.dump(calibration, f, indent=2)
+
+    if engine is not None and ckpt_path is not None:
+        engine.trainer.save_checkpoint(str(ckpt_path))
+
+    print(f"  校準完成（{len(scores)} 張訓練圖片，同建庫圖）")
+    print(f"  threshold={threshold:.4f}  min={img_min:.4f}  max={img_max:.4f}")
+    print(f"  校準檔：{cal_path}")
+    return calibration
+
+
 def _read_checkpoint_calib(ckpt_path) -> dict | None:
     """讀取指定 checkpoint 的 post_processor min/max/threshold（用於比較），失敗回 None。"""
     try:
@@ -138,6 +176,7 @@ def train_category(
     backbone: str = "wide_resnet50_2",
     layers_str: str = "11",
     val_mode: str = "from_train",
+    few_mode: str = "split",
 ) -> None:
     # DINOv2 層標籤，例如 "3,9" → "3_9"
     layer_tag = layers_str.replace(",", "_") if backbone == "dinov2" else ""
@@ -169,6 +208,13 @@ def train_category(
     if val_mode == "independent":
         indval_tag = f"indval_dinov2_{layer_tag}" if backbone == "dinov2" else "indval"
         save_dir = MODELS_DIR / category / indval_tag
+
+    # few-shot full 模式：100% 少量圖建庫、用同批圖校準，存到 few{N}_full/（與 split 分開）
+    if few_mode == "full" and max_train_images is not None:
+        if backbone == "dinov2":
+            save_dir = MODELS_DIR / category / f"few{max_train_images}_full_dinov2_{layer_tag}"
+        else:
+            save_dir = MODELS_DIR / category / f"few{max_train_images}_full"
 
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -214,6 +260,11 @@ def train_category(
             val_split_mode = ValSplitMode.NONE
             val_ratio      = 0.0
 
+        # few-shot full 模式：全部少量圖都建庫、不切驗證集（訓練後用同批圖校準）
+        if few_mode == "full" and max_train_images is not None:
+            val_split_mode = ValSplitMode.NONE
+            val_ratio      = 0.0
+
         datamodule = Folder(
             name=category,
             root=LOCO_ROOT / category,
@@ -252,7 +303,7 @@ def train_category(
         # independent 模式無驗證集，關閉 Lightning 的 val 迴圈與 sanity check
         # （記憶庫仍於訓練階段建立，min/max/threshold 之後用 validation/good 校準）
         engine_kwargs = {}
-        if val_mode == "independent":
+        if val_mode == "independent" or (few_mode == "full" and max_train_images is not None):
             engine_kwargs = {"limit_val_batches": 0, "num_sanity_val_steps": 0}
 
         engine = Engine(
@@ -287,6 +338,11 @@ def train_category(
             print(f"  [比較] independent ：threshold={calib['threshold']:.4f}  min={calib['img_min']:.4f}  max={calib['img_max']:.4f}")
         else:
             print("  [比較] 找不到 from_train checkpoint，略過比較")
+
+    # few-shot full 模式：用建庫的同一批圖校準 threshold/min/max，並重存 checkpoint
+    if few_mode == "full" and max_train_images is not None and latest_ckpt is not None:
+        print(f"\n[{category}] few-shot full 校準（同建庫 {len(selected)} 張）…")
+        calibrate_with_images(model, [p for p, _ in selected], save_dir, engine, latest_ckpt)
 
     # 記憶庫大小（訓練後特徵向量數量）
     memory_bank_size: int | None = None
@@ -359,6 +415,14 @@ def main() -> None:
         dest="val_mode",
         help="驗證集模式：from_train（現有，從訓練集切 20%%）或 independent（用 100%% train 建特徵庫，再用 validation/good 做閾值校準）",
     )
+    parser.add_argument(
+        "--few-mode",
+        type=str,
+        default="split",
+        choices=["split", "full"],
+        dest="few_mode",
+        help="few-shot 模式：split（現有，60%% train + 40%% val）或 full（100%% train，同 5 張做校準）",
+    )
     args = parser.parse_args()
 
     categories = args.categories if args.categories else CATEGORIES
@@ -374,7 +438,7 @@ def main() -> None:
     for cat in categories:
         train_category(cat, max_train_images=args.max_train_images,
                        seed=args.seed, backbone=args.backbone, layers_str=args.layers,
-                       val_mode=args.val_mode)
+                       val_mode=args.val_mode, few_mode=args.few_mode)
 
     print(f"\n{'='*55}")
     print(f"全部完成！共訓練 {len(categories)} 個類別。")
