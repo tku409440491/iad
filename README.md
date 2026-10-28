@@ -429,6 +429,7 @@ python compute_metrics.py --file results/patchcore_vlm_text_combined_lqsq_counti
 | `patchcore_vlm_pipeline_combined_lqsq_counting_qwen.py` | VLM 後端換本地 **Qwen2.5-VL 7B（4-bit）** |
 | `qwen_inference.py` / `vlm_counting_qwen.py` | 本地 Qwen 推論與計數（prompt 與 Gemma 版完全相同） |
 | `patchcore_vlm_pipeline_combined_comad_lqsq.py` | 加入 ComAD 組成分析（需 ComAD 分割輸出） |
+| `recompute_patchcore_raw.py` | 分析工具：對 MVTec AD / VisA 重算純 PatchCore 的 raw vs clipped AUROC（不呼叫 VLM），`--dataset {mvtecad, visa}` |
 
 ---
 
