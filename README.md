@@ -191,32 +191,42 @@ pip install -r requirements.txt
 
 ### 目錄結構
 
-> ⚠️ **重要**：目前程式碼以 `Path.home() / "data/iad/..."` 寫死絕對路徑（**未來版本將改為相對路徑/可設定路徑**）。在改版前，請務必把 repo 與資料集放到下列位置，否則路徑會找不到。
+程式以 **`code/` 為根目錄**，以模組方式執行（`python -m src.<子套件>.<模組>`），**不需要設定 `PYTHONPATH`**。
 
 ```
-~/data/iad/
-├── code/                       ← clone 本 repo 到這裡
-│   ├── patchcore_train.py
-│   ├── generate_questions_logic.py
-│   ├── ... （其餘程式）
-│   └── results/                ← 自動產生（已 .gitignore，不進版控）
-│       ├── patchcore_models/           # PatchCore checkpoints
-│       ├── auto_questions/             # LQ/SQ/計數規格書 JSON
-│       └── *_results.jsonl             # 推論結果
-│
-├── mvtec_loco/                 ← 自行下載解壓
-│   ├── breakfast_box/
-│   │   ├── train/good/
-│   │   ├── validation/good/
-│   │   └── test/{good, logical_anomalies, structural_anomalies}/
-│   ├── juice_bottle/
-│   ├── pushpins/
-│   ├── screw_bag/
-│   └── splicing_connectors/
-│
-├── mvtec_ad/                   ← 選用；{類別}/test/{good, 各異常類型}/
-└── visa/visa_pytorch/          ← 選用；{類別}/test/{good, bad}/（.JPG）
+code/                          ← clone 本 repo（位置任意）
+├── src/                       目前最新版本的程式（Python 套件）
+│   ├── config.py              路徑設定：CODE_DIR / DATA_ROOT / RESULTS_DIR
+│   ├── core/                  VLM 推論核心、計數模組、Qwen 後端
+│   ├── comad/                 ComAD 組成分析
+│   ├── train/                 PatchCore / EfficientAD 訓練
+│   ├── questions/             問題與計數規格書生成
+│   ├── pipeline/              最終推論管線
+│   ├── eval/                  指標計算
+│   └── figure/                論文用質化圖
+├── experiments/               演進與消融版本（各資料夾含 CHANGES.md）
+├── results/                   自動產生（已 .gitignore，不進版控）
+│   ├── patchcore_models/      PatchCore checkpoints
+│   ├── auto_questions/        LQ/SQ 問題與計數規格書 JSON
+│   └── *_results.jsonl        推論結果
+└── requirements.txt
+
+<DATA_ROOT>/                   資料集根目錄；預設為 code/ 的上一層（即 ~/data/iad/）
+├── mvtec_loco/                ← 自行下載解壓
+│   ├── breakfast_box/{train,validation,test}/...
+│   ├── juice_bottle/   pushpins/   screw_bag/   splicing_connectors/
+├── mvtec_ad/                  選用
+└── visa/visa_pytorch/         選用
 ```
+
+**路徑設定說明**
+
+- **results**：一律位於 `code/results/`，由程式位置自動推算，clone 到任何位置都能用。
+- **資料集**：預設在 `code/` 的上一層。若資料集放在其他位置，設定環境變數即可，不必修改程式：
+
+  ```bash
+  export IAD_DATA_ROOT=/你的/資料集/路徑
+  ```
 
 ### MVTec LOCO-AD 各類別圖片數量
 
@@ -250,7 +260,7 @@ echo 'export GEMINI_API_KEY="你的_API_KEY"' >> ~/.bashrc && source ~/.bashrc
 
 以下以 **MVTec LOCO-AD、最佳配置（LQSQ + 計數）** 為例。一個完全沒接觸過本專案的人，照此順序即可跑完整套實驗。
 
-> 所有指令都在 `~/data/iad/code/` 下、`conda activate iad` 後執行。
+> 所有指令都在 `code/` 下、`conda activate iad` 後執行，程式以 `python -m src.<子套件>.<模組>` 方式呼叫（不需要設定 `PYTHONPATH`）。
 > 想先小規模驗證，各推論指令都可加 `--test-only`（每類別每子集只跑第 1 張）。
 
 ### 步驟總覽與依賴關係
@@ -272,13 +282,13 @@ echo 'export GEMINI_API_KEY="你的_API_KEY"' >> ~/.bashrc && source ~/.bashrc
 
 ```bash
 # 全部 5 個類別：
-python patchcore_train.py
+python -m src.train.patchcore_train
 
 # 或單一類別：
-python patchcore_train.py --category breakfast_box
+python -m src.train.patchcore_train --category breakfast_box
 ```
 
-- **輸入**：`~/data/iad/mvtec_loco/{類別}/{train,validation}/good/`
+- **輸入**：`<DATA_ROOT>/mvtec_loco/{類別}/{train,validation}/good/`
 - **輸出**：`results/patchcore_models/{類別}/Patchcore/{類別}/vN/weights/lightning/model.ckpt`
 - **預期時間**：ResNet 骨幹約每類別 2–4 分鐘（RTX 4060）。
 - **常用參數**：`--backbone {wide_resnet50_2, dinov2}`、`--layers`（DINOv2 用）、`--max-train-images N`（few-shot）、`--seed`。
@@ -288,8 +298,8 @@ python patchcore_train.py --category breakfast_box
 **需 API key。**
 
 ```bash
-python generate_questions_logic.py --n-images 5           # 全部類別
-# python generate_questions_logic.py --category breakfast_box --n-images 5
+python -m src.questions.generate_questions_logic --n-images 5           # 全部類別
+# python -m src.questions.generate_questions_logic --category breakfast_box --n-images 5
 ```
 
 - **輸入**：`{類別}/train/good/` 前 5 張。
@@ -299,7 +309,7 @@ python generate_questions_logic.py --n-images 5           # 全部類別
 ### 步驟 3：生成結構性問題（SQ）
 
 ```bash
-python generate_questions_structural.py --n-images 5
+python -m src.questions.generate_questions_structural --n-images 5
 ```
 
 - **輸出**：`results/auto_questions/{類別}_structural.json`
@@ -307,7 +317,7 @@ python generate_questions_structural.py --n-images 5
 ### 步驟 4：生成計數規格書
 
 ```bash
-python generate_counting_spec.py --n-images 5
+python -m src.questions.generate_counting_spec --n-images 5
 ```
 
 - **輸出**：`results/auto_questions/{類別}_counting_spec.json`
@@ -319,10 +329,10 @@ python generate_counting_spec.py --n-images 5
 
 ```bash
 # 快速驗證（每類別每子集第 1 張）：
-python patchcore_vlm_pipeline_combined_lqsq_counting.py --category breakfast_box --mode text --test-only --reset
+python -m src.pipeline.patchcore_vlm_pipeline_combined_lqsq_counting --category breakfast_box --mode text --test-only --reset
 
 # 完整跑全部類別：
-python patchcore_vlm_pipeline_combined_lqsq_counting.py --mode text
+python -m src.pipeline.patchcore_vlm_pipeline_combined_lqsq_counting --mode text
 ```
 
 - **輸入**：PatchCore checkpoint + LQ/SQ 問題 + 計數規格書 + 測試圖片。
@@ -341,7 +351,7 @@ python patchcore_vlm_pipeline_combined_lqsq_counting.py --mode text
 **不需 API key。** 純讀 JSONL。
 
 ```bash
-python compute_metrics.py --file results/patchcore_vlm_text_combined_lqsq_counting_results.jsonl --score combined
+python -m src.eval.compute_metrics --file results/patchcore_vlm_text_combined_lqsq_counting_results.jsonl --score combined
 ```
 
 - **輸出**：印出 LOGICAL / STRUCTURAL / OVERALL 三段，各含逐類別 + 平均的 F1-max、AUROC、fixed-F1、good-FP 率。
@@ -397,70 +407,137 @@ python compute_metrics.py --file results/patchcore_vlm_text_combined_lqsq_counti
 
 ## 程式功能對照表
 
-### 主線（MVTec LOCO-AD）
+程式分成三個位置，皆在 `code/` 下以模組方式執行（`python -m <模組>`）：
 
-| 程式 | 功能 |
+- **`src/`**：目前最新版本，可直接重現主結果。
+- **`experiments/`**：演進與消融版本。每個資料夾的 `CHANGES.md` 說明相對於 base 的改動。與 `src/` **不保證同步**，這是刻意的設計。
+- **`experiments/legacy_*`**：早期流程，保留供歷史參考。
+
+### src/core：推論核心
+
+| 模組 | 功能 |
 |------|------|
-| `patchcore_train.py` | 訓練 PatchCore 記憶庫（`--backbone`、`--max-train-images` few-shot、`--val-mode`、`--few-mode`） |
-| `generate_questions_logic.py` | 生成 LQ（邏輯性）問題清單 |
-| `generate_questions_structural.py` | 生成 SQ（結構性）問題清單 |
-| `generate_counting_spec.py` | 生成計數規格書 |
-| `gemini_inference.py` | VLM 呼叫與 prompt 建構的**共用核心**（各 pipeline 皆重用其 prompt 函式） |
-| `vlm_counting.py` | 計數模組（`load_counting_spec` / `vlm_count`） |
-| `compute_metrics.py` | 計算 AUROC / F1-max / fixed-F1 / good-FP（`--file` / `--all`） |
+| `src.core.gemini_inference` | VLM 呼叫與 prompt 建構的**共用核心**（各 pipeline 皆重用其 prompt 函式） |
+| `src.core.vlm_counting` | 計數模組（Gemma 版，`load_counting_spec` / `vlm_count`） |
+| `src.core.vlm_counting_qwen` | 計數模組（本地 Qwen 版，prompt 與 Gemma 版相同） |
+| `src.core.qwen_inference` | 本地 Qwen2.5-VL 推論與 JSON 容錯解析 |
 
-### 推論 Pipeline（由簡到繁，對應消融）
+### src/train：訓練
 
-| 程式 | 對應配置 |
-|------|----------|
-| `patchcore_vlm_pipeline_nopc.py` | 純 VLM（不接收 PatchCore 資訊） |
-| `patchcore_vlm_pipeline_auto.py` | PatchCore 輔助 VLM（VLM 做最終判定） |
-| `patchcore_vlm_pipeline_combined.py` | Combined 融合（未加 LQSQ/計數） |
-| `patchcore_vlm_pipeline_combined_lqsq.py` | Combined + LQSQ 分離問題 |
-| **`patchcore_vlm_pipeline_combined_lqsq_counting.py`** | **Combined + LQSQ + 計數（最佳配置）** |
-
-### 消融/延伸變體
-
-| 程式 | 差異 |
+| 模組 | 功能 |
 |------|------|
-| `patchcore_vlm_pipeline_combined_lqsq_counting_maxpixel.py` | PatchCore 報告改「異常最高點百分比座標」+ 一致性引導 |
-| `patchcore_vlm_pipeline_combined_lqsq_counting_indval.py` | 用獨立 `validation/good` 校準（`indval/` checkpoint） |
-| `patchcore_vlm_pipeline_combined_lqsq_counting_fewshot.py` | few-shot full 模式（5 張建庫、同批圖校準） |
-| `patchcore_vlm_pipeline_combined_lqsq_counting_qwen.py` | VLM 後端換本地 **Qwen2.5-VL 7B（4-bit）** |
-| `qwen_inference.py` / `vlm_counting_qwen.py` | 本地 Qwen 推論與計數（prompt 與 Gemma 版完全相同） |
-| `patchcore_vlm_pipeline_combined_comad_lqsq.py` | 加入 ComAD 組成分析（需 ComAD 分割輸出） |
-| `recompute_patchcore_raw.py` | 分析工具：對 MVTec AD / VisA 重算純 PatchCore 的 raw vs clipped AUROC（不呼叫 VLM），`--dataset {mvtecad, visa}` |
+| `src.train.patchcore_train` | LOCO 版 PatchCore 訓練（`--backbone`、`--max-train-images`、`--val-mode`、`--few-mode`） |
+| `src.train.patchcore_train_mvtecad` / `_mvtecad2` / `_visa` | 對應資料集的 PatchCore 訓練 |
+| `src.train.efficientad_train` | EfficientAD 訓練（`--model-size`、`--max-steps`） |
 
----
+### src/questions：問題與規格書生成
+
+| 模組 | 功能 |
+|------|------|
+| `src.questions.generate_questions_logic` | 生成 LQ（邏輯性）問題清單 |
+| `src.questions.generate_questions_structural` | 生成 SQ（結構性）問題清單 |
+| `src.questions.generate_counting_spec` | 生成計數規格書 |
+| `src.questions.generate_*_mvtecad` / `_mvtecad2` / `_visa` | 對應資料集的版本（同上三種） |
+
+### src/comad：ComAD 組成分析
+
+| 模組 | 功能 |
+|------|------|
+| `src.comad.comad_to_text` | 把 ComAD 分割結果轉成文字描述（需 `comad_repo/` 的分割輸出） |
+| `src.comad.generate_comad_spec` | 生成正常品組成規格書 |
+
+### src/pipeline：最終推論管線
+
+| 模組 | 功能 |
+|------|------|
+| **`src.pipeline.patchcore_vlm_pipeline_combined_lqsq_counting`** | **最佳配置**：Combined + LQSQ + 計數（LOCO） |
+| `src.pipeline.patchcore_vlm_pipeline_mvtecad` / `_mvtecad2` / `_visa` | 對應資料集的最佳配置 |
+| `src.pipeline.efficientad_vlm_pipeline_combined` | EfficientAD + VLM 融合 |
+
+### src/eval：評估
+
+| 模組 | 功能 |
+|------|------|
+| `src.eval.compute_metrics` | AUROC / F1-max / fixed-F1 / good-FP（`--file` / `--all`） |
+| `src.eval.compute_metrics_mvtecad` | MVTec AD / VisA 格式的指標（overall + 各異常類型 Recall） |
+| `src.eval.recompute_patchcore_raw` | 重算純 PatchCore 的 raw vs clipped AUROC（不呼叫 VLM） |
+| `src.eval.patchcore_baseline` | PatchCore baseline 評估（無參數解析，直接執行） |
+
+### src/figure：論文圖
+
+| 模組 | 功能 |
+|------|------|
+| `src.figure.make_vlm_figure` | 質化結果圖（合成大圖 + 獨立原圖/熱力圖） |
+| `src.figure.visualize_gt` | MVTec LOCO-AD ground truth 視覺化 |
+
+### experiments/vlm_pipeline：消融演進（base → add_*）
+
+| 資料夾 | 模組 | 相對上一版的改動 |
+|--------|------|------------------|
+| `base/` | `experiments.vlm_pipeline.base.patchcore_vlm_pipeline_nopc` | 基準：純 VLM，不接收 PatchCore 資訊 |
+| `add_patchcore/` | `experiments.vlm_pipeline.add_patchcore.patchcore_vlm_pipeline_auto` | 加入 PatchCore 報告，VLM 做最終判定 |
+| `add_combined/` | `experiments.vlm_pipeline.add_combined.patchcore_vlm_pipeline_combined` | 改為分數融合 |
+| `add_lqsq/` | `experiments.vlm_pipeline.add_lqsq.patchcore_vlm_pipeline_combined_lqsq` | LQ / SQ 分離 |
+| `add_maxpixel/` | `experiments.vlm_pipeline.add_maxpixel.patchcore_vlm_pipeline_combined_lqsq_counting_maxpixel` | 最高點百分比座標 + 一致性引導 |
+| `add_indval/` | `experiments.vlm_pipeline.add_indval.patchcore_vlm_pipeline_combined_lqsq_counting_indval` | 獨立 validation 校準 |
+| `add_fewshot/` | `experiments.vlm_pipeline.add_fewshot.patchcore_vlm_pipeline_combined_lqsq_counting_fewshot` | few-shot full 模式 |
+| `add_qwen/` | `experiments.vlm_pipeline.add_qwen.patchcore_vlm_pipeline_combined_lqsq_counting_qwen` | 本地 Qwen2.5-VL 7B（4-bit） |
+| `add_comad/` | `experiments.vlm_pipeline.add_comad.patchcore_vlm_pipeline_combined_comad_lqsq` | 加入 ComAD 組成分析 |
+
+### experiments/legacy_gemini：以 Gemini 為核心的早期實驗（base = `evaluate_gemini_only`）
+
+| 資料夾 | 模組 | 說明 |
+|--------|------|------|
+| `base/` | `experiments.legacy_gemini.base.evaluate_gemini_only` | 純 Gemini，不畫 YOLO 框 |
+| `add_yolo_boxes/` | `experiments.legacy_gemini.add_yolo_boxes.evaluate_pipeline` | 先 YOLO 畫框再送 Gemini |
+| `add_auto_questions/` | `experiments.legacy_gemini.add_auto_questions.evaluate_pipeline_auto` | 改用自動生成問題 |
+| `add_logicqa/` | `experiments.legacy_gemini.add_logicqa.evaluate_pipeline_logicqa` | LogicQA 方法比較 |
+| `add_f1max/` | `experiments.legacy_gemini.add_f1max.yolo_gemma_f1max` | YOLO 最佳 threshold 的 F1-max |
+
+### experiments/legacy_yolo_only：只使用 YOLO 的早期流程
+
+| 模組 | 功能 |
+|------|------|
+| `experiments.legacy_yolo_only.train_yolo` | 訓練 YOLO |
+| `experiments.legacy_yolo_only.prepare_yolo_dataset` / `convert_gt_to_yolo` | 準備 YOLO 格式資料集 |
+| `experiments.legacy_yolo_only.visualize_detections` | YOLO 偵測結果視覺化 |
+| `experiments.legacy_yolo_only.conf_sweep` / `yolo_auroc` | YOLO conf 掃描與 AUROC |
+| `experiments.legacy_yolo_only.inspect_result` | 檢視 YOLO 偵測結果 |
+
+### experiments/exploration：探索性實驗
+
+| 模組 | 功能 |
+|------|------|
+| `experiments.exploration.test_logprobs` | 測試 Gemma 備用 anomaly score 方案（非主線） |
 
 ## 重現消融實驗
 
-消融的關鍵在於：**同一套訓練好的 PatchCore 與問題檔**，只更換推論 pipeline，再用同一支 `compute_metrics.py` 評估。
+消融的關鍵在於：**同一套訓練好的 PatchCore 與問題檔**，只更換推論 pipeline，再用同一支 `src.eval.compute_metrics` 評估。
 
 ```bash
 # 前置：步驟 1–4 完成一次即可（所有消融共用）
 
 # 純 PatchCore（AUROC 0.825）：用任一含 patchcore_norm_score 的結果檔，--score patchcore
-python compute_metrics.py --file results/patchcore_vlm_text_combined_lqsq_counting_results.jsonl --score patchcore
+python -m src.eval.compute_metrics --file results/patchcore_vlm_text_combined_lqsq_counting_results.jsonl --score patchcore
 
 # 純 VLM（0.768）：
-python patchcore_vlm_pipeline_nopc.py --mode text
-python compute_metrics.py --file results/patchcore_vlm_text_nopc_results.jsonl --score vlm
+python -m experiments.vlm_pipeline.base.patchcore_vlm_pipeline_nopc --mode text
+python -m src.eval.compute_metrics --file results/patchcore_vlm_text_nopc_results.jsonl --score vlm
 
 # PatchCore 輔助 VLM（VLM 最終判定，0.825）：
-python patchcore_vlm_pipeline_auto.py --mode text
-python compute_metrics.py --file results/patchcore_vlm_text_auto_results.jsonl --score vlm
+python -m experiments.vlm_pipeline.add_patchcore.patchcore_vlm_pipeline_auto --mode text
+python -m src.eval.compute_metrics --file results/patchcore_vlm_text_auto_results.jsonl --score vlm
 
 # Combined 未加計數（0.898）：
-python patchcore_vlm_pipeline_combined_lqsq.py --mode text
-python compute_metrics.py --file results/patchcore_vlm_text_combined_lqsq_results.jsonl --score combined
+python -m experiments.vlm_pipeline.add_lqsq.patchcore_vlm_pipeline_combined_lqsq --mode text
+python -m src.eval.compute_metrics --file results/patchcore_vlm_text_combined_lqsq_results.jsonl --score combined
 
 # Combined + 計數（最佳，0.915）：
-python patchcore_vlm_pipeline_combined_lqsq_counting.py --mode text
-python compute_metrics.py --file results/patchcore_vlm_text_combined_lqsq_counting_results.jsonl --score combined
+python -m src.pipeline.patchcore_vlm_pipeline_combined_lqsq_counting --mode text
+python -m src.eval.compute_metrics --file results/patchcore_vlm_text_combined_lqsq_counting_results.jsonl --score combined
 
 # 一次比較所有結果檔：
-python compute_metrics.py --all
+python -m src.eval.compute_metrics --all
 ```
 
 ---
@@ -471,19 +548,19 @@ python compute_metrics.py --all
 
 | 資料集 | 訓練 | 問題生成 | 推論 | 指標 |
 |--------|------|---------|------|------|
-| **MVTec AD**（15 類） | `patchcore_train_mvtecad.py` | `generate_*_mvtecad.py` | `patchcore_vlm_pipeline_mvtecad.py` | `compute_metrics_mvtecad.py` |
-| **MVTec AD 2**（8 類） | `patchcore_train_mvtecad2.py` | `generate_*_mvtecad2.py` | `patchcore_vlm_pipeline_mvtecad2.py` | `compute_metrics_mvtecad.py` |
-| **VisA**（12 類） | `patchcore_train_visa.py` | `generate_*_visa.py` | `patchcore_vlm_pipeline_visa.py` | `compute_metrics_mvtecad.py` |
+| **MVTec AD**（15 類） | `src.train.patchcore_train_mvtecad` | `generate_*_mvtecad.py` | `src.pipeline.patchcore_vlm_pipeline_mvtecad` | `src.eval.compute_metrics_mvtecad` |
+| **MVTec AD 2**（8 類） | `src.train.patchcore_train_mvtecad2` | `generate_*_mvtecad2.py` | `src.pipeline.patchcore_vlm_pipeline_mvtecad2` | `src.eval.compute_metrics_mvtecad` |
+| **VisA**（12 類） | `src.train.patchcore_train_visa` | `generate_*_visa.py` | `src.pipeline.patchcore_vlm_pipeline_visa` | `src.eval.compute_metrics_mvtecad` |
 
 範例（VisA 的 candle）：
 
 ```bash
-python patchcore_train_visa.py --category candle
-python generate_questions_logic_visa.py --category candle --n-images 5
-python generate_questions_structural_visa.py --category candle --n-images 5
-python generate_counting_spec_visa.py --category candle --n-images 5
-python patchcore_vlm_pipeline_visa.py --category candle --mode text --test-only --reset
-python compute_metrics_mvtecad.py --file results/patchcore_vlm_visa_results.jsonl --score combined
+python -m src.train.patchcore_train_visa --category candle
+python -m src.questions.generate_questions_logic_visa --category candle --n-images 5
+python -m src.questions.generate_questions_structural_visa --category candle --n-images 5
+python -m src.questions.generate_counting_spec_visa --category candle --n-images 5
+python -m src.pipeline.patchcore_vlm_pipeline_visa --category candle --mode text --test-only --reset
+python -m src.eval.compute_metrics_mvtecad --file results/patchcore_vlm_visa_results.jsonl --score combined
 ```
 
 > VisA 圖片副檔名為 `.JPG`（大寫），程式已處理；MVTec AD 2 的測試集在 `test_public/{good,bad}`。
@@ -493,7 +570,7 @@ python compute_metrics_mvtecad.py --file results/patchcore_vlm_visa_results.json
 ## 常見問題排除
 
 **Q：找不到資料集 / checkpoint 路徑？**
-A：程式目前以 `~/data/iad/...` 寫死絕對路徑。請確認 repo 在 `~/data/iad/code/`、LOCO 資料集在 `~/data/iad/mvtec_loco/`。（未來版本會改相對路徑。）
+A：程式以 `code/src/config.py` 自動推算路徑，results 位於 `code/results/`。資料集預設在 `code/` 的上一層；若不同，請設定 `export IAD_DATA_ROOT=/你的/資料集/路徑`（見[目錄結構](#目錄結構)）。
 
 **Q：`請先設定環境變數 GEMINI_API_KEY`？**
 A：`export GEMINI_API_KEY="…"`（見 [API Key 設定](#api-key-設定)）。訓練與計算指標不需要，只有問題生成與推論需要。
